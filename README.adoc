@@ -1,0 +1,4 @@
+= From Zero to Hero with Apache Kudu
+
+This repository contains the slides and a walkthrough of the demos presented at
+BOSS'19 hosted in _Los Angeles, California_.

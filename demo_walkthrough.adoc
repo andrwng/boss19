@@ -1,0 +1,306 @@
+= BOSS Workshop 2019 Demo Walkthrough
+
+This details the steps of the demos given at the Kudu workshop at BOSS'19. The
+steps are written for most macOS or Linux users, but many steps should have
+equivalents for Windows, given the use of Docker.
+
+== Initial single-node deployment and exploration of Kudu
+
+This section relies on the Quickstart binaries hosted on DockerHub. Run the
+following to set up your local environment.
+
+[source,bash]
+----
+$ docker pull apache/kudu:latest
+$ export KUDU_QUICKSTART_IP=$(ifconfig | grep "inet " | grep -Fv 127.0.0.1 |  awk '{print $2}' | tail -1)
+----
+
+Run the following to deploy the latest Kudu Docker image.
+
+[source,bash]
+----
+$ docker run -e KUDU_QUICKSTART_IP -it -p 8050:8050 -p 7050:7050 -p 8051:8051 -p 7051:7051 apache/kudu:latest bash
+----
+
+The container should have Kudu binaries (CLI tooling and the Kudu Master and
+Tablet Server) and the `www`, which is used by the Kudu processes to stylize
+their web interfaces.
+
+[source,bash]
+----
+kudu@8dba6cf371bf:/opt/kudu$ ls
+bin  www
+kudu@8dba6cf371bf:/opt/kudu$ ls bin
+kudu  kudu-master  kudu-tserver
+----
+
+Now create directories in which to store our Master and Tablet Server data, and
+then deploy the Kudu processes.
+
+[source,bash]
+----
+kudu@8dba6cf371bf:/opt/kudu$ mkdir master tserver
+kudu@8dba6cf371bf:/opt/kudu$ kudu-tserver \
+    --fs_wal_dir=/opt/kudu/tserver/test-wal \
+    --logtostderr \
+    --use_hybrid_clock=false \
+    --rpc_bind_addresses=0.0.0.0:7050 \
+    --rpc_advertised_addresses=${KUDU_QUICKSTART_IP}:7050 \
+    --webserver_port=8050 \
+    --webserver_advertised_addresses=${KUDU_QUICKSTART_IP}:8050 \
+    --webserver_doc_root=/opt/kudu/www \
+    --stderrthreshold=0 &> tserver.log &
+kudu@8dba6cf371bf:/opt/kudu$ kudu-master \
+    --fs_wal_dir=/opt/kudu/master/test-wal \
+    --logtostderr \
+    --use_hybrid_clock=false \
+    --rpc_bind_addresses=0.0.0.0:7051 \
+    --rpc_advertised_addresses=${KUDU_QUICKSTART_IP}:7051 \
+    --webserver_port=8051 \
+    --webserver_advertised_addresses=${KUDU_QUICKSTART_IP}:8051 \
+    --webserver_doc_root=/opt/kudu/www \
+    --stderrthreshold=0 &> master.log &
+----
+
+With this, you should be able to view the web interface of both the Kudu Master
+(at `0.0.0.0:8051`) and Tablet Server (at `0.0.0.0:8050`).
+
+Once it is verified that both processes are up and healthy, use the Kudu CLI
+tool to create a test table. By default, the table will have eight partitions.
+Since we only have a single server, we must have a Raft replication factor of
+one.
+
+[source,bash]
+----
+kudu@8dba6cf371bf:/opt/kudu$ kudu perf loadgen 0.0.0.0:7051 --table_num_replicas=1 --keep_auto_table
+Using auto-created table 'default.loadgen_auto_1ad04a44b32f42a8b58b5d3e4cd8ec0a'
+
+Generator report
+  time total  : 43.794 ms
+  time per row: 0.021897 ms
+----
+
+Verify that the table and underlying tablets are created by looking at the
+Master (`0.0.0.0:8051/tables`) and Tablet Server (`0.0.0.0:8050/tablets`) web
+interfaces.
+
+Now let's try reading the auto-generated rows from the table using the CLI
+tool. You can look at (`0.0.0.0:8050/scans`) to see the individual tablet scans
+that are performed in this command.
+
+[source,bash]
+----
+kudu@8dba6cf371bf:/opt/kudu$ kudu table scan 0.0.0.0:7051 default.loadgen_auto_1ad04a44b32f42a8b58b5d3e4cd8ec0a
+...
+(int64 key=5784, int32 int_val=5785, string string_val="5786.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5805, int32 int_val=5806, string string_val="5807.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5868, int32 int_val=5869, string string_val="5870.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5874, int32 int_val=5875, string string_val="5876.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5913, int32 int_val=5914, string string_val="5915.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5922, int32 int_val=5923, string string_val="5924.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5964, int32 int_val=5965, string string_val="5966.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5967, int32 int_val=5968, string string_val="5969.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5982, int32 int_val=5983, string string_val="5984.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+(int64 key=5988, int32 int_val=5989, string string_val="5990.xxxxxxxxxxxxxxxxxxxxxxxxxxx")
+T 5f70005322a7442887fbd478abda7457 scanned count 264 cost 0.0065995 seconds
+Total count 2000 cost 0.10129 seconds
+----
+
+With some tablets created, let's look at the underlying storage of each tablet.
+Try to piece together concepts from the workshop slides and verify the contents
+here with your understanding of Kudu tablets.
+
+[source,bash]
+----
+kudu@8dba6cf371bf:/opt/kudu$ kudu fs list --fs_wal_dir=/opt/kudu/tserver/test-wal
+...
+I0912 19:07:44.967044   329 fs_manager.cc:436] Opened local filesystem: /opt/kudu/tserver/test-wal
+uuid: "d3e105c3206145d8a3d2612657ce900d"
+format_stamp: "Formatted at 2019-09-12 18:53:38 on bb1b94ed07a5"
+            tablet-id             | rowset-id | block-id | block-kind
+----------------------------------+-----------+----------+------------
+ 5f70005322a7442887fbd478abda7457 | 0         | 20       | column
+ 5f70005322a7442887fbd478abda7457 | 0         | 21       | column
+ 5f70005322a7442887fbd478abda7457 | 0         | 22       | column
+ 5f70005322a7442887fbd478abda7457 | 0         | 24       | undo
+ 5f70005322a7442887fbd478abda7457 | 0         | 23       | bloom
+ 01283414c6a04aab863f2be5bd3eec3f | 0         | 2        | column
+ 01283414c6a04aab863f2be5bd3eec3f | 0         | 3        | column
+ 01283414c6a04aab863f2be5bd3eec3f | 0         | 4        | column
+ 01283414c6a04aab863f2be5bd3eec3f | 0         | 6        | undo
+ 01283414c6a04aab863f2be5bd3eec3f | 0         | 5        | bloom
+ 0079c492acfa489e9db30bd8353f95aa | 0         | 26       | column
+ 0079c492acfa489e9db30bd8353f95aa | 0         | 27       | column
+ 0079c492acfa489e9db30bd8353f95aa | 0         | 28       | column
+ 0079c492acfa489e9db30bd8353f95aa | 0         | 30       | undo
+ 0079c492acfa489e9db30bd8353f95aa | 0         | 29       | bloom
+ 966eddcb946540cc94886aa1858740ff | 0         | 14       | column
+ 966eddcb946540cc94886aa1858740ff | 0         | 15       | column
+ 966eddcb946540cc94886aa1858740ff | 0         | 16       | column
+ 966eddcb946540cc94886aa1858740ff | 0         | 18       | undo
+ 966eddcb946540cc94886aa1858740ff | 0         | 17       | bloom
+ ee37572ea1014e5bb8fd59ff21e763d4 | 0         | 8        | column
+ ee37572ea1014e5bb8fd59ff21e763d4 | 0         | 9        | column
+ ee37572ea1014e5bb8fd59ff21e763d4 | 0         | 10       | column
+ ee37572ea1014e5bb8fd59ff21e763d4 | 0         | 12       | undo
+ ee37572ea1014e5bb8fd59ff21e763d4 | 0         | 11       | bloom
+ b71fcba32a4344ba96c8a887fc9b342b | 0         | 38       | column
+ b71fcba32a4344ba96c8a887fc9b342b | 0         | 39       | column
+ b71fcba32a4344ba96c8a887fc9b342b | 0         | 40       | column
+ b71fcba32a4344ba96c8a887fc9b342b | 0         | 42       | undo
+ b71fcba32a4344ba96c8a887fc9b342b | 0         | 41       | bloom
+ 44a62b0dc78342c0806c2c0a900acc4d | 0         | 44       | column
+ 44a62b0dc78342c0806c2c0a900acc4d | 0         | 45       | column
+ 44a62b0dc78342c0806c2c0a900acc4d | 0         | 46       | column
+ 44a62b0dc78342c0806c2c0a900acc4d | 0         | 48       | undo
+ 44a62b0dc78342c0806c2c0a900acc4d | 0         | 47       | bloom
+ 4313e0dcfa004165b11febabf61011e8 | 0         | 32       | column
+ 4313e0dcfa004165b11febabf61011e8 | 0         | 33       | column
+ 4313e0dcfa004165b11febabf61011e8 | 0         | 34       | column
+ 4313e0dcfa004165b11febabf61011e8 | 0         | 36       | undo
+ 4313e0dcfa004165b11febabf61011e8 | 0         | 35       | bloom
+----
+
+Exit the Docker container.
+
+== Running the multi-node Quickstart
+
+This section relies on `docker-compose` scripts found in the Kudu repository.
+Run the following to set up your local environment.
+
+[source,bash]
+----
+git clone https://github.com/apache/kudu.git
+cd kudu
+----
+
+Run the following to deploy multiple Kudu Masters and Tablet Servers. By
+default, the Quickstart runs three Masters and five Tablet Servers.
+
+[source,bash]
+----
+$ export KUDU_QUICKSTART_IP=$(ifconfig | grep "inet " | grep -Fv 127.0.0.1 |  awk '{print $2}' | tail -1)
+$ docker-compose -f docker/quickstart.yml
+Creating network "docker_default" with the default driver
+Creating volume "docker_kudu-master-1" with default driver
+Creating volume "docker_kudu-master-2" with default driver
+Creating volume "docker_kudu-master-3" with default driver
+Creating volume "docker_kudu-tserver-1" with default driver
+Creating volume "docker_kudu-tserver-2" with default driver
+Creating volume "docker_kudu-tserver-3" with default driver
+Creating volume "docker_kudu-tserver-4" with default driver
+Creating volume "docker_kudu-tserver-5" with default driver
+Creating docker_kudu-master-2_1 ... done
+Creating docker_kudu-master-1_1 ... done
+Creating docker_kudu-master-3_1 ... done
+Creating docker_kudu-tserver-5_1 ... done
+Creating docker_kudu-tserver-4_1 ... done
+Creating docker_kudu-tserver-2_1 ... done
+Creating docker_kudu-tserver-3_1 ... done
+Creating docker_kudu-tserver-1_1 ... done
+Attaching to docker_kudu-master-2_1, docker_kudu-master-1_1, docker_kudu-master-3_1, docker_kudu-tserver-5_1, docker_kudu-tserver-2_1, docker_kudu-tserver-3_1, docker_kudu-tserver-1_1, docker_kudu-tserver-4_1
+----
+
+Examine the Master web interface (e.g. `0.0.0.0:8051/masters` and
+`0.0.0.0:8051/tservers`) and verify your understanding of Kudu's distributed
+architecture.
+
+In a separate terminal, let's log into one of the masters so we can run some
+commands.
+
+[source,bash]
+----
+$ docker exec -it $(docker ps -aqf "name=kudu-master-1") /bin/bash
+kudu@fe459855ff47:/opt/kudu$
+----
+
+Let's check the cluster health.
+
+[source,bash]
+----
+kudu@fe459855ff47:/opt/kudu$ bin/kudu cluster ksck kudu-master-1:7051,kudu-master-2:7151,kudu-master-3:7251
+Master Summary
+               UUID               |      Address       | Status
+----------------------------------+--------------------+---------
+ 448893e57335475b9f0b72401053d047 | kudu-master-2:7151 | HEALTHY
+ 5f083263894c4df687aaaffdd1e2452e | kudu-master-1:7051 | HEALTHY
+ d29ddaf0c51b40d7846d5db9e2b47f53 | kudu-master-3:7251 | HEALTHY
+
+       Flag       | Value |  Tags  |         Master
+------------------+-------+--------+-------------------------
+ use_hybrid_clock | false | hidden | all 3 server(s) checked
+
+Tablet Server Summary
+               UUID               |     Address      | Status  | Location
+----------------------------------+------------------+---------+----------
+ 3db1abb0ba724b69b43e05ba194e3f9b | 10.16.0.250:7450 | HEALTHY | <none>
+ 41c623a3ebf942099f627cad06b3d265 | 10.16.0.250:7250 | HEALTHY | <none>
+ 773722dbac4546b1a4e886a321dbd905 | 10.16.0.250:7350 | HEALTHY | <none>
+ bfad1b5e46534feb9b040f1cc2109a7b | 10.16.0.250:7050 | HEALTHY | <none>
+ d313df3a87db4372bd54ff545680c39a | 10.16.0.250:7150 | HEALTHY | <none>
+
+Tablet Server Location Summary
+ Location |  Count
+----------+---------
+ <none>   |       5
+
+       Flag       | Value |  Tags  |      Tablet Server
+------------------+-------+--------+-------------------------
+ use_hybrid_clock | false | hidden | all 5 server(s) checked
+
+Version Summary
+ Version |         Servers
+---------+-------------------------
+ 1.10.0  | all 8 server(s) checked
+
+The cluster doesn't have any matching tablets
+
+The cluster doesn't have any matching tables
+Tablet Replica Count Summary
+   Statistic    | Replica Count
+----------------+---------------
+ Minimum        | 0
+ First Quartile | 0
+ Median         | 0
+ Third Quartile | 0
+ Maximum        | 0
+
+
+==================
+Warnings:
+==================
+Some masters have unsafe, experimental, or hidden flags set
+Some tablet servers have unsafe, experimental, or hidden flags set
+
+OK
+----
+
+Now let's try creating a table and writing some rows.
+
+[source,bash]
+----
+kudu@fe459855ff47:/opt/kudu$ bin/kudu perf loadgen kudu-master-1:7051,kudu-master-2:7151,kudu-master-3:7251 --keep_auto_table  --table_num_replicas=3
+Using auto-created table 'default.loadgen_auto_0d1cb5b1460c4084a5cabf35ca91507a'
+
+Generator report
+  time total  : 127.69 ms
+  time per row: 0.063845 ms
+----
+
+From the Master web interface (`0.0.0.0:8051/tables`), identify the unique
+table ID for `default.loadgen_auto_0d1cb5b1460c4084a5cabf35ca91507a`, (in this
+case, `a9e20d49a83a4cbebeff2b58a10f3672`) and look at the table page for that
+table (at `0.0.0.0:8051/table?id=a9e20d49a83a4cbebeff2b58a10f3672`).
+Look at the replica counts and skew metrics to verify your understanding of
+Kudu.
+
+Look at the Tablet Server web interfaces and examine the individual replicas
+for the new tablets.
+
+== Spark SQL and Nifi walkthrough
+
+The rest of the demo material can be found checked into Kudu's `master` branch
+here:
+
+* https://github.com/apache/kudu/tree/master/examples/quickstart/spark[Spark quickstart]
+* https://github.com/apache/kudu/tree/master/examples/quickstart/nifi[NiFi quickstart]
